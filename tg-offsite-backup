@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# tg-offsite-backup — encrypted offsite backups straight into a Telegram chat.
+#
+# Pipeline: WAL-safe SQLite snapshots + config paths → tar.gz → gpg (symmetric)
+# → Telegram bot sendDocument. Plus local rotation and a dead-man marker file
+# your monitoring can watch (".last-ok" only updates on a SUCCESSFUL offsite).
+#
+# Why Telegram as offsite: free, encrypted file already (gpg before upload),
+# instantly visible in chat, and you're already there when the alert fires.
+#
+# Config via env or an env file (ENV_FILE):
+#   BACKUP_DBS    space-separated SQLite paths   "db1.db /path/db2.db"
+#   BACKUP_PATHS  space-separated config files/globs to include
+#   BACKUP_DIR    local backup dir                (default: /var/backups/offsite)
+#   PASS_FILE     gpg passphrase file             (default: /root/.backup-pass)
+#   KEEP          local copies to keep            (default: 14)
+#   TG_BOT_TOKEN  bot token  (in ENV_FILE, never in the script!)
+#   TG_CHAT_ID    where to send
+#
+# Cron: 0 4 * * * ENV_FILE=/etc/backup.env /usr/local/bin/tg-offsite-backup >> /var/log/tg-backup.log 2>&1
+set -euo pipefail
+
+[ -n "${ENV_FILE:-}" ] && [ -f "$ENV_FILE" ] && {
+	set -a
+	. "$ENV_FILE"
+	set +a
+}
+
+BACKUP_DIR="${BACKUP_DIR:-/var/backups/offsite}"
+PASS_FILE="${PASS_FILE:-/root/.backup-pass}"
+KEEP="${KEEP:-14}"
+TS=$(date +%Y%m%d_%H%M%S)
+mkdir -p "$BACKUP_DIR"
+TMP=$(mktemp -d)
+ARC=$(mktemp --suffix=.tar.gz)
+trap 'rm -rf "$TMP" "$ARC"' EXIT
+
+# --- SQLite (".backup" is consistent even mid-write with WAL) ---
+for db in ${BACKUP_DBS:-}; do
+	name="$(basename "$db")"
+	sqlite3 "$db" ".backup '$TMP/$name'" 2>/dev/null || echo "warn: $name skipped"
+done
+
+# --- config files ---
+for f in ${BACKUP_PATHS:-}; do
+	# shellcheck disable=SC2086
+	cp --parents $f "$TMP/" 2>/dev/null || true
+done
+
+# --- archive + encrypt (ARC lives OUTSIDE $TMP — or tar eats itself) ---
+tar czf "$ARC" -C "$TMP" . 2>/dev/null
+ENC="$BACKUP_DIR/full_$TS.tar.gz.gpg"
+gpg --batch --yes --passphrase-file "$PASS_FILE" -o "$ENC" -c "$ARC"
+
+# --- offsite to Telegram ---
+OK=0
+if [ -n "${TG_BOT_TOKEN:-}" ] && [ -n "${TG_CHAT_ID:-}" ]; then
+	curl -sf --max-time 60 -F chat_id="$TG_CHAT_ID" -F document=@"$ENC" \
+		-F caption="🔐 backup $TS (gpg)" \
+		"https://api.telegram.org/bot$TG_BOT_TOKEN/sendDocument" >/dev/null && OK=1
+fi
+
+# --- rotate local copies ---
+ls -1t "$BACKUP_DIR"/full_*.tar.gz.gpg 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f
+
+# --- dead-man marker (only on successful offsite) ---
+if [ "$OK" = 1 ]; then
+	touch "$BACKUP_DIR/.last-ok"
+	echo "$(date '+%F %T') backup OK → TG ($(du -h "$ENC" | cut -f1))"
+else
+	echo "$(date '+%F %T') offsite FAILED (local copy kept: $ENC)"
+	exit 1
+fi

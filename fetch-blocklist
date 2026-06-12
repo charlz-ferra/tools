@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# fetch-blocklist — pull the Hagezi TIF threat blocklist, with sanity checks.
+#
+# TIF = Threat Intelligence Feeds: malware, phishing, scam, cryptojacking.
+# Deliberately NO ads/trackers/telemetry lists — mixing those in makes normal
+# traffic (app-measurement, doubleclick & co) light up as "threats" and your
+# alerting becomes noise. Threat lists are for threats.
+#
+# Refuses to replace a working list with a broken download (size sanity check).
+#
+# Config via env:
+#   BLOCKLIST_URL   source list  (default: Hagezi TIF hosts format)
+#   BLOCKLIST_PATH  where to put it (default: /var/lib/blocklists/dangerous_domains.txt)
+#   MIN_ENTRIES     refuse the download below this count (default: 1000)
+#
+# Cron: 0 4 * * * /usr/local/bin/fetch-blocklist
+set -euo pipefail
+
+BLOCKLIST_URL="${BLOCKLIST_URL:-https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/tif.txt}"
+BLOCKLIST_PATH="${BLOCKLIST_PATH:-/var/lib/blocklists/dangerous_domains.txt}"
+MIN_ENTRIES="${MIN_ENTRIES:-1000}"
+TMP_FILE="$(mktemp)"
+trap 'rm -f "$TMP_FILE"' EXIT
+
+mkdir -p "$(dirname "$BLOCKLIST_PATH")"
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+
+echo "$(ts) Downloading threat list..."
+if curl -fsSL --max-time 120 "$BLOCKLIST_URL" -o "$TMP_FILE" && [ -s "$TMP_FILE" ]; then
+	COUNT=$(grep -c '^0\.0\.0\.0' "$TMP_FILE" || true)
+	if [ "$COUNT" -lt "$MIN_ENTRIES" ]; then
+		echo "$(ts) ERROR: suspiciously few entries ($COUNT < $MIN_ENTRIES), keeping the old list" >&2
+		exit 1
+	fi
+	mv "$TMP_FILE" "$BLOCKLIST_PATH"
+	echo "$(ts) Blocklist updated: $COUNT entries"
+else
+	echo "$(ts) ERROR: download failed, keeping the old list" >&2
+	exit 1
+fi

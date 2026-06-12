@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# safe-restart — restart a service WITHOUT losing it when your SSH session dies.
+#
+# The problem: you SSH into a box and restart the very service your connection
+# depends on (VPN endpoint, network stack, sshd itself). The session drops,
+# the restart command dies with it, and the service never comes back up.
+# Congratulations, you now own a brick in a datacenter.
+#
+# The fix: schedule the restart through a transient systemd timer. It is
+# detached from your login session and is GUARANTEED to finish, even when
+# SSH falls over mid-restart. Your session may still drop (that part is
+# physics) — just reconnect in ~15s. The restart will have completed cleanly.
+#
+# Usage:
+#   safe-restart <service> [delay-seconds]
+#   safe-restart x-ui
+#   safe-restart hysteria-server 5
+set -euo pipefail
+
+SVC="${1:?usage: safe-restart <service> [delay-seconds]}"
+DELAY="${2:-2}"
+
+systemd-run \
+	--on-active="${DELAY}" \
+	--unit="safe-restart-${SVC}" \
+	--collect \
+	systemctl restart "${SVC}" >/dev/null
+
+echo "✅ Restart of ${SVC} scheduled in ${DELAY}s (detached from this session)."
+echo "   Check in ~10s: systemctl is-active ${SVC}"
