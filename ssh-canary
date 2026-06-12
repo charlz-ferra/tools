@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# ssh-canary — get a Telegram ping the instant anyone opens an SSH session.
+#
+# Hooks into PAM (pam_exec) so it fires on EVERY successful SSH login, root or
+# not, key or password. It reports who, from where, which key, and — loudly —
+# whether that key/host combo has ever logged in before ("NEW DEVICE"). The day
+# someone walks in on a stolen key, you find out from your phone in seconds, not
+# from the logs three weeks later.
+#
+# Install (as root):
+#   install -m 755 ssh-canary /usr/local/bin/ssh-canary
+#   echo '/etc/ssh-canary.env (chmod 600):'
+#     TG_BOT_TOKEN=123:abc
+#     TG_CHAT_ID=123456789
+#     # optional:
+#     GEOIP_DB=/var/lib/GeoLite2-Country.mmdb   # local geo, no third party
+#     GEO_API=0                                 # 1 = fall back to ip-api.com (leaks IPs!)
+#     CANARY_STATE=/var/lib/ssh-canary/seen     # known key+host fingerprints
+#   # then add to the END of /etc/pam.d/sshd:
+#     session optional pam_exec.so /usr/local/bin/ssh-canary
+#
+# Opsec note: by default geo lookups are LOCAL (GeoLite2 mmdb) or skipped.
+# ssh-canary never phones a third party unless you set GEO_API=1 — because a
+# security tool that quietly tells ip-api.com every address you log in from is
+# not, in fact, a security tool.
+#
+# Fails silent and never blocks login: it's `session optional`, every external
+# call is time-boxed, and any error just means no ping — never a locked door.
+set -uo pipefail
+
+ENV_FILE="${CANARY_ENV:-/etc/ssh-canary.env}"
+[ -r "$ENV_FILE" ] && {
+	set -a
+	# shellcheck source=/dev/null
+	. "$ENV_FILE"
+	set +a
+}
+
+# Only fire when a session is being OPENED (pam runs us on open and close).
+[ "${PAM_TYPE:-}" = "open_session" ] || exit 0
+
+TG_BOT_TOKEN="${TG_BOT_TOKEN:-}"
+TG_CHAT_ID="${TG_CHAT_ID:-}"
+[ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ] || exit 0
+
+GEOIP_DB="${GEOIP_DB:-}"
+GEO_API="${GEO_API:-0}"
+STATE="${CANARY_STATE:-/var/lib/ssh-canary/seen}"
+
+USER_="${PAM_USER:-?}"
+RHOST="${PAM_RHOST:-?}"
+SERVICE="${PAM_SERVICE:-sshd}"
+TTY="${PAM_TTY:-?}"
+WHEN="$(date '+%F %T %Z')"
+HOSTNAME_="$(hostname -s 2>/dev/null || echo box)"
+
+# ── key fingerprint: scrape the journal for THIS connection's Accepted line ──
+FPRINT=""
+METHOD=""
+if command -v journalctl >/dev/null 2>&1; then
+	line="$(journalctl _COMM=sshd --since "15 seconds ago" -o cat 2>/dev/null |
+		grep -aE "Accepted .* for ${USER_} from ${RHOST} " | tail -1)"
+	if [ -n "$line" ]; then
+		METHOD="$(printf '%s' "$line" | awk '{print $1=="Accepted"?$2:$1}')"
+		FPRINT="$(printf '%s' "$line" | grep -aoE 'SHA256:[A-Za-z0-9+/=]+' | head -1)"
+	fi
+fi
+[ -n "$METHOD" ] || METHOD="session"
+
+# ── geo: local mmdb first; external only if explicitly allowed ──────────────
+GEO=""
+if [ -n "$GEOIP_DB" ] && [ -r "$GEOIP_DB" ] && command -v mmdblookup >/dev/null 2>&1 &&
+	printf '%s' "$RHOST" | grep -qE '^[0-9a-fA-F:.]+$'; then
+	GEO="$(mmdblookup --file "$GEOIP_DB" --ip "$RHOST" country names en 2>/dev/null |
+		grep -aoE '"[^"]+"' | head -1 | tr -d '"')"
+fi
+if [ -z "$GEO" ] && [ "$GEO_API" = 1 ] && command -v curl >/dev/null 2>&1; then
+	GEO="$(curl -fsS --max-time 4 "http://ip-api.com/line/${RHOST}?fields=country,city" 2>/dev/null |
+		paste -sd', ' - 2>/dev/null)"
+fi
+[ -n "$GEO" ] && GEO=" · ${GEO}"
+
+# ── new-device detection: have we seen this user+host+key before? ───────────
+NEW=""
+KEYID="${USER_}@${RHOST}:${FPRINT:-nokey}"
+mkdir -p "$(dirname "$STATE")" 2>/dev/null || true
+if [ -f "$STATE" ] && grep -qxF "$KEYID" "$STATE" 2>/dev/null; then
+	NEW=""
+else
+	NEW=" 🆕 NEW DEVICE"
+	printf '%s\n' "$KEYID" >>"$STATE" 2>/dev/null || true
+fi
+
+# ── compose + send (time-boxed, never blocks the login) ─────────────────────
+read -r -d '' MSG <<EOF || true
+🔓 SSH login${NEW}
+host: ${HOSTNAME_}
+user: ${USER_}  (${METHOD})
+from: ${RHOST}${GEO}
+key:  ${FPRINT:-—}
+tty:  ${TTY}  · ${SERVICE}
+at:   ${WHEN}
+EOF
+
+command -v curl >/dev/null 2>&1 && curl -fsS --max-time 6 \
+	-d chat_id="$TG_CHAT_ID" \
+	--data-urlencode "text=${MSG}" \
+	"https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" >/dev/null 2>&1 || true
+
+exit 0

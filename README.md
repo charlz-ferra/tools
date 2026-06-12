@@ -10,6 +10,7 @@
 | `safe-restart`      | Restart a service your SSH session depends on — without bricking it    |
 | `fetch-blocklist`   | Pull the Hagezi TIF threat list, refuse broken downloads               |
 | `tg-offsite-backup` | WAL-safe SQLite + configs → tar → gpg → Telegram, with dead-man marker |
+| `ssh-canary`        | Telegram ping on every SSH login — who, where, which key, new-device   |
 
 ## safe-restart
 
@@ -58,10 +59,36 @@ TG_BOT_TOKEN=...
 TG_CHAT_ID=...
 ```
 
+## ssh-canary
+
+A pager for your front door. Hooks into PAM so it fires on **every** successful
+SSH login — root or not, key or password — and pushes a Telegram message with
+the user, source IP (+ geo), the SSH key fingerprint, and a loud `🆕 NEW DEVICE`
+flag the first time a given key/host combo shows up. The day someone walks in on
+a stolen key, you hear about it from your phone in seconds.
+
+```bash
+sudo install -m 755 ssh-canary /usr/local/bin/
+sudo tee /etc/ssh-canary.env >/dev/null <<'EOF'
+TG_BOT_TOKEN=123:abc
+TG_CHAT_ID=123456789
+GEOIP_DB=/var/lib/GeoLite2-Country.mmdb   # local geo, optional
+GEO_API=0                                 # 1 = ip-api.com fallback (leaks IPs!)
+EOF
+sudo chmod 600 /etc/ssh-canary.env
+echo 'session optional pam_exec.so /usr/local/bin/ssh-canary' | sudo tee -a /etc/pam.d/sshd
+```
+
+It's `session optional` and every external call is time-boxed, so a broken token
+or a dead network means _no ping_ — never a locked-out login. Geo lookups are
+**local by default** (GeoLite2 mmdb) or skipped; it only talks to a third-party
+API if you explicitly set `GEO_API=1`, because a tripwire that narcs your every
+login IP to `ip-api.com` defeats the point.
+
 ## Install
 
 ```bash
-sudo install -m 755 safe-restart fetch-blocklist tg-offsite-backup /usr/local/bin/
+sudo install -m 755 safe-restart fetch-blocklist tg-offsite-backup ssh-canary /usr/local/bin/
 ```
 
 ## License

@@ -11,4 +11,4 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: shellcheck
-        run: shellcheck -S style safe-restart fetch-blocklist tg-offsite-backup
+        run: shellcheck -S style safe-restart fetch-blocklist tg-offsite-backup ssh-canary
