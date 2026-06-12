@@ -18,6 +18,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: install bats
-        run: npm install -g bats
+        run: git clone --depth 1 https://github.com/bats-core/bats-core /tmp/bats
       - name: bats
-        run: bats tests/
+        run: /tmp/bats/bin/bats tests/
