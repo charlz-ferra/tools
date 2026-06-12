@@ -1,5 +1,7 @@
 # tools
 
+[![ci](https://github.com/charlz-ferra/tools/actions/workflows/ci.yml/badge.svg)](https://github.com/charlz-ferra/tools/actions/workflows/ci.yml)
+
 > Small sharp automation, UNIX-style. Each script does one thing,
 > survives `set -euo pipefail`, and has been run in anger on a real box.
 
