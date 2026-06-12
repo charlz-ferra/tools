@@ -12,3 +12,12 @@ jobs:
       - uses: actions/checkout@v5
       - name: shellcheck
         run: shellcheck -S style safe-restart fetch-blocklist tg-offsite-backup ssh-canary
+
+  bats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: install bats
+        run: npm install -g bats
+      - name: bats
+        run: bats tests/
